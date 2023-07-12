@@ -1,0 +1,994 @@
+---
+title: "Esame scienza di dati - Formula 1 🏎️"
+author: "Enrico Franco, 144237"
+date: "2023-07-14"
+output:
+  ioslides_presentation: 
+    css: style.css
+#output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, comment="", message = FALSE, warning = FALSE)
+```
+
+```{r}
+#---Libraries---#
+
+library(dplyr, warn.conflicts =  FALSE)
+library(ggplot2)
+# label on the plots
+library(ggrepel)
+# plot side by side
+library(patchwork)
+# melt dataframe
+library(reshape2)
+# interactive plot
+library(plotly)
+# better print table
+library(gt)
+library(gtExtras)
+```
+
+## Formula 1
+
+**Formula 1** is the highest class of international racing for open-wheel single-seater formula racing cars. The FIA Formula 1 World Championship has been one of the premier forms of racing around the world since 1950. 
+
+The word _formula_ refers to the set of rules to which all participants' cars must conform and the season consists of a series of races, known as Grands Prix (GP), in multiple countries and continents around the world.
+
+## Contents
+
+1. Problem and Objective
+2. Data preparation
+3. Different type of Regressions
+4. Finding and conclusion
+
+## Questions
+
+Is it possible to predict the number of total points each driver will finish the Formula 1 Championship with?
+
+# Dataset
+
+## Ergast API
+
+The Ergast Developer API is an experimental web service which provides a historical record of motor racing data for non-commercial purposes. The API provides data for the Formula One series, from the beginning of the world championships in 1950 to today. It's even possible to [download the database tables in CSV format](https://ergast.com/downloads/f1db_csv.zip) or the [SQL image](https://ergast.com/downloads/f1db.sql.gz).
+
+Each CSV file contains a single database table and the first line of each file contains the column headers. 
+The tables are described in the [User Guide](https://ergast.com/docs/f1db_user_guide.txt).
+
+---
+
+```{r}
+#---Import the files---#
+
+results <- read.csv("f1db_csv/results.csv")
+
+status <- read.csv("f1db_csv/status.csv")
+
+driver_standings <- read.csv("f1db_csv/driver_standings.csv")
+
+drivers <- read.csv("f1db_csv/drivers.csv")
+  
+constructor_standings <- read.csv("f1db_csv/constructor_standings.csv")
+
+constructors <- read.csv("f1db_csv/constructors.csv")
+  
+#qualifying <- read.csv("f1db_csv/qualifying.csv")
+
+races <- read.csv("f1db_csv/races.csv")
+```
+
+### Results
+```{r}
+results <- results %>%  
+             select(-c(resultId, number, positionText, time, milliseconds, fastestLap, position, rank))
+
+# add status to results
+results <- left_join(results, status, by = "statusId")
+
+# convert mean velocity during the fastestlap in number and place 0 instead of NA
+results$fastestLapSpeed <- as.numeric(results$fastestLapSpeed) %>% 
+  replace(is.na(.), 0)
+
+head(results) %>% 
+  gt() %>% 
+  gt_theme_espn()
+```
+
+### Drivers
+```{r}
+driver_standings <- driver_standings %>% 
+                      select(-c(positionText, driverStandingsId))
+
+# create the name
+drivers$driverName <- paste(drivers$forename, drivers$surname, sep=" ")
+
+drivers <- drivers %>% 
+             select(-c(driverRef, number, code, nationality, url, forename, surname))
+
+driver_standings <- left_join(driver_standings, drivers, by = "driverId")
+
+head(driver_standings) %>% 
+  gt() %>% 
+  gt_theme_espn()
+```
+
+### Constructors
+```{r}
+constructor_standings <- constructor_standings %>% 
+                            select(-c(constructorStandingsId, positionText))
+
+constructors <- constructors %>% 
+                    select(-c(constructorRef, nationality, url))
+
+constructor_standings <- left_join(constructor_standings, constructors, by = "constructorId")
+
+head(constructor_standings) %>% 
+  gt() %>% 
+  gt_theme_espn()
+```
+
+### Races and circuits
+```{r}
+races <- races %>% 
+            select(raceId, year, round, date, circuitId, name)
+
+head(races) %>% 
+  gt() %>% 
+  gt_theme_espn()
+```
+
+## Merging informations to a single dataframe 
+```{r}
+# add results informations
+final_data <- left_join(results, races, by = "raceId") %>% 
+                relocate(year, date, circuitId, name, .after = "raceId") #%>% 
+                #mutate(date = as.Date(date))
+final_data <- rename(final_data, gpName = name)
+
+# add drivers informations
+final_data <- left_join(final_data, drivers, by = "driverId") %>% 
+                relocate(driverName, dob, .after = "driverId")
+
+# add constructor informations
+final_data <- left_join(final_data, constructors, by = "constructorId") %>% 
+                relocate(name, .after = "constructorId")
+final_data <- rename(final_data, constructorName = name)
+
+head(final_data) %>% 
+  gt() %>% 
+  gt_theme_espn()
+```
+
+## Calculate new features to add to the dataframe
+
+>- **winRate**: Likelihood of winning a race for every driver
+```{r}
+# count every attended race for each driver
+n_driver_races <- final_data %>% 
+                    count(driverId)
+
+# count every win for each driver
+wins <- final_data %>% 
+          filter(positionOrder == 1) %>% 
+          count(driverId)
+
+# calculate the rateo in %
+win_rate <- inner_join(n_driver_races, wins, by = "driverId") %>%
+              mutate(winRate = (n.y / n.x) * 100) %>% 
+              select(driverId, winRate)
+
+# add the win rate to the dataframe
+final_data <- left_join(final_data, win_rate, by = "driverId")
+
+# driver who never won have 0 instead of NA
+final_data$winRate[is.na(final_data$winRate)] <- 0
+```
+
+>- **qualiRate**: Likelihood of qualifying first for every driver
+```{r}
+# count every qualifying round won by each driver
+quali_wins <- final_data %>% 
+          filter(grid == 1) %>% 
+          count(driverId)
+
+# calculate the rateo in %
+quali_win_rate <- inner_join(n_driver_races, quali_wins, by = "driverId") %>%
+              mutate(qualiRate = (n.y / n.x) * 100) %>% 
+              select(driverId, qualiRate)
+
+# add the qualifying rate to the dataframe
+final_data <- left_join(final_data, quali_win_rate, by = "driverId") %>% 
+                relocate(winRate, qualiRate, .after = "dob")
+# driver who never won qualifying have 0 instead of NA
+final_data$qualiRate[is.na(final_data$qualiRate)] <- 0
+```
+
+```{r}
+#---Plot of the Rates just found---#
+
+head(final_data %>% 
+  # seelct just one occurence for each driver
+  group_by(driverId) %>% 
+  slice(1) %>% 
+  # arrange the winRate
+  arrange(desc(winRate)) %>% 
+  ungroup() %>% 
+  # select the information to show
+  filter(winRate > 0 | qualiRate > 0 ) %>% 
+  select(driverName, winRate, qualiRate), n = 15) %>%  # only 15 of them
+  # theme
+  gt() %>% 
+  gt_theme_espn()
+```
+
+
+## Heatmap
+```{r}
+# select only the numeric data 
+heat_final_data <- final_data %>% 
+                     select_if(is.numeric)
+
+# create the molten dataframe with the correlation for the heatmap
+molten_cor_matrix <- melt(cor(heat_final_data))
+
+ggplot(molten_cor_matrix, aes(x = Var1, y = Var2, fill = value)) + # fill based on the value of the correlation
+  geom_tile() +
+  # Aesthetic
+  scale_fill_gradient2(low = "#ffff99", mid = "#FFcc99", high = "red", name = "Correlation") + # scale of the colors
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # angle the text on the x axes
+  coord_equal() + # make everything a square
+  labs(x = "", y = "") + # remove axes' name on the axes
+  ggtitle("Heatmap of the dataframe")
+```
+
+# Analysis
+
+## Classify races in first and second half of the championship
+```{r}
+divided_races <- races %>%
+  group_by(year) %>%
+  arrange(year) %>% 
+  mutate(totalRaces = n()) %>% # add number of races to totalRaces
+  mutate(halfRaces = ceiling(totalRaces / 2)) %>% # ceiling to add more races the the first half
+  slice(1) %>% # filter just the first row for every year
+  select(year, totalRaces, halfRaces)
+
+# add the number of total races and half of that to the final dataframe
+final_data <- inner_join(divided_races, final_data, by = "year")
+
+# calculate the points for each driver of the first half of championship
+first_half_points <- final_data %>%
+  group_by(year, driverId) %>%
+  filter(round <= halfRaces) %>% # only the races in the first half of the championship
+  group_by(year, driverId) %>%
+  summarise(firstHalfPoints = sum(points), .groups = "drop") # add the sum on points for each driver and place it in the firstHalfPoints column
+```
+
+```{r}
+# sum all points for each driver
+all_points <- final_data %>% 
+               group_by(year, driverId) %>% 
+               summarise(allPoints = sum(points), .groups = "drop")
+
+# create the data used to plot the training data
+plot_data <- full_join(first_half_points, all_points, by = c("year", "driverId")) %>% 
+               replace(is.na(.), 0) # place 0 in the firstHalfPoints where it's NA caused by drivers run just on the second half of the championship
+
+# create the 2023 dataframe
+data_2023 <- subset(plot_data, year == 2023) %>% 
+               #rename(new_firstHalfPoints = firstHalfPoints) %>% 
+               ungroup() 
+#remove the 2023 data for the training
+plot_data <- subset(plot_data, year != 2023)
+
+ggplot(plot_data, aes(firstHalfPoints, allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  theme(legend.position="none") +
+  # labels
+  geom_label(data = subset(plot_data, firstHalfPoints == max(firstHalfPoints)), 
+             aes(label = drivers$driverName[drivers$driverId == driverId]), 
+             # position of the label
+             vjust = 1, nudge_x = 6, nudge_y = -10) +
+  geom_label(data = subset(plot_data, allPoints == max(allPoints)), 
+             aes(label = drivers$driverName[drivers$driverId == driverId]),
+             # position of the label
+             hjust = 1, nudge_x = -3) +
+  # axes
+  xlim(0, 245) + # limit of the x axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Results points")
+```
+
+## Why points are concentrated near the 0?
+Let's find out: 
+
+>- the number of points awarded to the 1st place over the years
+>- the number of races on the calendar over the years
+>- the current point system for every race
+
+## Number of points awarded to the 1st place over the years
+```{r}
+# select the number of points given to a win during the years
+win_score <- final_data %>%
+  group_by(year) %>%
+  summarise(pointsForWin = max(points), .groups = "drop") %>%
+  ungroup()
+
+ggplot(win_score, aes(year, pointsForWin, fill = as.factor(pointsForWin))) +
+  # axes
+  xlab("Year") +
+  ylab("Points for a single win") +
+  # title
+  ggtitle("Points for a win in all the years") +
+  # legend
+  scale_fill_discrete(name = "Points for a single Win") +
+  geom_bar(stat = "identity") # to use the number as the height of the bars
+
+# removed data from 2014 as it's an outlier and the last seasons (2023)
+final_data <- subset(final_data, year != 2014 & year != 2023) 
+plot_data <- subset(plot_data, year != 2014)
+```
+
+## Number of races run for each championship
+```{r}
+# Calculate the number of races run for each championship
+calendar <- final_data %>%
+  group_by(year) %>%
+  summarise(racesForYear = max(round), .groups = "drop") %>%
+  ungroup()
+
+ggplot(calendar, aes(year, racesForYear, fill = as.factor(racesForYear))) +
+  # axes
+  xlab("Year") +
+  ylab("Races in the season") +
+  # title
+  ggtitle("Number of races in all the years") +
+  # legend
+  scale_fill_discrete(name = "Number of races") +
+  geom_bar(stat = "identity") # to use the number as the height of the bars
+```
+
+## The current point system introduced by the FIA 
+
+```{r}
+fia_points <- final_data %>% 
+  # filter the last race
+  filter(year == 2022 & round == 10 & points > 0) %>% 
+  ungroup() %>% 
+  # selection
+  select(positionOrder, points) %>% 
+  rename(position = positionOrder)
+
+# removed the fastest lap point
+fia_points[fia_points == 16] <- 15
+
+fia_points %>% 
+  # theme
+  gt() %>% 
+  gt_theme_espn()
+```
+  
+and 1 point is added to the driver who made the fastest lap during the race.
+
+# Training Dataframe
+
+## Calculate: 
+>- new points using the last point system introduced by the FIA
+>- average points scored by each driver
+>- copy the qualifying and win rates to the training dataframe
+
+```{r}
+# function to calculate the points using the new point system
+calculate_points <- function(data) {
+  result <- data %>%
+    group_by(driverId, positionOrder, year) %>%
+    summarise(number = n(), .groups = "drop") %>% # count the races for each driver in each year
+    # create a new column called points 
+    mutate(points = case_when( # switch case that change the old points with the new ones
+      positionOrder == 1 ~ 25,
+      positionOrder == 2 ~ 18,
+      positionOrder == 3 ~ 15,
+      positionOrder == 4 ~ 12,
+      positionOrder == 5 ~ 10,
+      positionOrder == 6 ~ 8,
+      positionOrder == 7 ~ 6,
+      positionOrder == 8 ~ 4,
+      positionOrder == 9 ~ 2,
+      positionOrder == 10 ~ 1,
+      TRUE ~ 0
+    )) %>%
+    mutate(points_per_driver = number * points) %>% # calculate the new points for the race
+    group_by(driverId, year) %>%
+    summarise(new_points = sum(points_per_driver), .groups = "drop") %>% # sum every points for all the races a single driver run
+    ungroup()
+    
+  return(result)
+}
+
+# convert all the points with the new system
+current_all_points <- calculate_points(final_data) %>% 
+                        rename(new_allPoints = new_points)
+
+# convert just the points of the first half of championships the points with the new system
+current_first_half_points <- final_data %>%
+                               filter(round <= halfRaces) %>%
+                               calculate_points() %>% 
+                               rename(new_firstHalfPoints = new_points) # rename the column
+```
+
+```{r}
+# inner_join() to remove the third pilots or ones who just run a single race
+training_data <- inner_join(plot_data, current_first_half_points, by = c("driverId", "year")) %>% # remove third pilots
+  left_join(current_all_points, by = c("driverId", "year")) %>% 
+  arrange(driverId) %>% 
+  # add the name of the driver
+  left_join(drivers[,c("driverId", "driverName")], by = "driverId") %>% 
+  relocate(driverName, .after = "driverId")
+```
+
+```{r}
+# calculate the average points score by each driver
+training_data <- training_data %>% 
+  group_by(driverId) %>% 
+  mutate(averagePoints = mean(allPoints)) %>% # mean of allPoints for every driver
+  ungroup()
+```
+
+```{r}
+# add number of races to the training dataframe
+training_data <- left_join(training_data, n_driver_races, by = "driverId") %>% 
+  relocate(n, .after = "driverId") %>% 
+  rename(races = n)
+```
+
+```{r}
+# add driver's win rate to the training data
+driver_win_rate <- unique(final_data %>% # get just one for each driver
+                     group_by(driverId) %>% 
+                     select(driverId, winRate))
+
+# add driver's qualifying rate to the training data
+driver_quali_rate <- unique(final_data %>% # get just one for each driver
+                     group_by(driverId) %>% 
+                     select(driverId, qualiRate))
+
+training_data <- left_join(training_data, driver_quali_rate, by = "driverId") %>% 
+                    left_join(., driver_win_rate, by = "driverId") %>% 
+                    # move the column to make it easier to see
+                    relocate(qualiRate, winRate, .after = "races")
+```
+
+## Training dataframe
+
+```{r}
+#---Print the training dataframe---#
+head(training_data %>% 
+       # order the dataframe
+       arrange(desc(new_allPoints))) %>% 
+        # theme
+        gt() %>% 
+        gt_theme_espn()
+```
+
+## Plot of the new point side by side with the old ones {.flexbox .vcenter}
+
+```{r}
+# plot the old points
+old <- ggplotly(ggplot(training_data, aes(firstHalfPoints, allPoints, colour = driverId, text = driverName)) + 
+                  geom_point(alpha = 0.8) +
+                  theme(legend.position="none") + # remove the legend
+                  # axes
+                  xlab("Points scored in half the season") +
+                  ylab("Points scored in all the season"), #+
+                  # title
+                  #ggtitle("Original points system"),
+                tooltip = "text")
+
+new <- ggplotly(ggplot(training_data, aes(new_firstHalfPoints, new_allPoints, colour = driverId, text = driverName)) + 
+                  geom_point(alpha = 0.8) +
+                  theme(legend.position="none") + # remove the legend
+                  # axes
+                  xlab("Points scored in half the season") +
+                  ylab("Points scored in all the season"), #+
+                  # title
+                  #ggtitle("New points system"),
+                tooltip = "text")
+
+# print them side by side
+subplot(old, new) %>% 
+  # title of the plot
+  layout(#title = 'Original vs New points system', 
+         # subtitles as title of the single plot
+         annotations = list(
+           list( 
+             # position of the text
+             x = 0.25,  
+             y = 1.0,  
+             text = "Original points system",  
+             # reference for position
+             xref = "paper",  
+             yref = "paper",  
+             # place it on top of the graph
+             xanchor = "center",  
+             yanchor = "bottom",
+             # disable the arrow
+             showarrow = FALSE), 
+           list( 
+             # position of the text
+             x = 0.75,  
+             y = 1, 
+             # text
+             text = "New points system", 
+             # reference for position
+             xref = "paper",  
+             yref = "paper",  
+             # place it on top of the graph
+             xanchor = "center",  
+             yanchor = "bottom",
+             # disable the arrow
+             showarrow = FALSE)
+           )
+         )
+```
+
+## Heatmap of the training data
+
+```{r}
+# create the molten dataframe with the correlation for the heatmap
+molten_cor_training <- melt(cor(training_data %>% 
+                                  select_if(is.numeric)
+)) 
+
+ggplot(molten_cor_training, aes(x = Var1, y = Var2, fill = value)) + # fill based on the value of the correlation
+  geom_tile() +
+  scale_fill_gradient2(low = "#ffff99", mid = "#FFcc99", high = "red", name = "Correlation") + # scale of the colors
+  theme_minimal() +
+  coord_equal() + # make everything a square
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # angle the text on the x axes
+  labs(x = "", y = "") + # remove axes' name on the axes
+  # title
+  ggtitle("Heatmap of the training data")
+```
+
+## Linear Regression
+
+**Linear** regression is a linear approach for modelling the relationship between a scalar response and one or more explanatory variables where the relationships are modeled using **linear predictor functions** whose unknown model parameters are estimated from the data.
+
+### with just half the points
+
+```{r}
+#--- Original points ---#
+# Calculate linear regression with just the points of the first half of the championship
+linear_regression_old <- training_data %>% 
+                           lm(allPoints ~ firstHalfPoints, data = .)
+
+# print the summary and information about the linear regression
+#paste0("R-squared: ", summary(linear_regression_old)$r.squared)
+
+# plot of the predicted value on top of the original ones using the linear regression
+old1 <- ggplot(training_data, aes(firstHalfPoints, allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = firstHalfPoints, y = predict(linear_regression_old)), color = "red", alpha = 0.8) +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Linear regression",subtitle = "Original points system")
+```
+
+```{r}
+#--- New points ---#
+# Calculate linear regression with just the points of the first half of the championship
+linear_regression_new <- training_data %>% 
+                           lm(new_allPoints ~ new_firstHalfPoints, data = .)
+
+# print the summary and information about the linear regressions
+#cat("\tOriginal Points \t\t\t\tNew Points")
+#cat("\tR-squared: ", summary(linear_regression_old)$r.squared, "\t\t\tR-squared: ", #summary(linear_regression_new)$r.squared)
+
+lm_r1 <- tibble("Original Points" = summary(linear_regression_old)$r.squared,
+       "New Points" = summary(linear_regression_new)$r.squared) 
+
+lm_r1 %>% 
+  gt %>% 
+   tab_header(
+    title = "R-squared"
+  ) %>% 
+  gt_theme_espn()
+
+# plot of the predicted value on top of the new ones using the linear regression
+new1 <- ggplot(training_data, aes(new_firstHalfPoints, new_allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = new_firstHalfPoints, y = predict(linear_regression_new)), color = "red", alpha = 0.8) +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Linear regression",subtitle = "New points system")
+
+# print them side by side
+old1 + new1
+```
+
+### with more features
+
+```{r}
+#--- Original points ---#
+
+# Calculate linear regression with more features than just the points of the first half of the championship
+linear_regression_old2 <- training_data %>% 
+                       lm(allPoints ~ firstHalfPoints + qualiRate + winRate + races + averagePoints, data = .)
+
+# print the summary and information about the linear regression
+#paste0("R-squared: ", summary(linear_regression_old2)$r.squared)
+
+# plot of the predicted value on top of the original ones using the linear regression
+old2 <- ggplot(training_data, aes(firstHalfPoints, allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = firstHalfPoints, y = predict(linear_regression_old2), alpha = 0.8), color = "red") +
+  theme(legend.position="none") + # remove the legend  
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Linear regression",subtitle = "Original points system")
+```
+
+```{r}
+#--- New points ---#
+
+# Calculate linear regression with more features than just the points of the first half of the championship
+linear_regression_new2 <- training_data %>% 
+                       lm(new_allPoints ~ new_firstHalfPoints + qualiRate + winRate + races + averagePoints, data = .)
+
+# print the summary and information about the linear regression
+#paste0("R-squared: ", summary(linear_regression_new2)$r.squared)
+
+lm_r2 <-tibble("Original Points" = summary(linear_regression_old2)$r.squared,
+       "New Points" = summary(linear_regression_new2)$r.squared)
+
+lm_r2 %>% 
+  gt %>% 
+   tab_header(
+    title = "R-squared"
+  ) %>% 
+  gt_theme_espn()
+
+# plot of the predicted value on top of the original ones using the linear regression
+new2 <- ggplot(training_data, aes(new_firstHalfPoints, new_allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = new_firstHalfPoints, y = predict(linear_regression_new2), alpha = 0.8), color = "red") +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Linear regression",subtitle = "New points system")
+
+# print them side by side
+old2 + new2
+```
+
+## Polynomial Regression 
+
+**Polynomial** regression is a form of regression analysis where the relationship between the independent variable and the dependent variable is modeled as an ^nth^ degree polynomial in x. It fits a **nonlinear relationship** between the value of x and the corresponding conditional mean of y.
+
+### with one feature
+
+```{r}
+#--- Original points ---#
+
+# Calculate polynomial regression with just the points of the first half of the championship
+poly_regression_old <- training_data %>% 
+                       lm(allPoints ~ poly(firstHalfPoints, 4), data = .)
+
+# print the summary and information about the polynomial regression
+#paste0("R-squared: ", summary(poly_regression_old)$r.squared)
+
+# plot of the predicted value on top of the original ones using the polynomial regression
+poly_old1 <- ggplot(training_data, aes(firstHalfPoints, allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = firstHalfPoints, y = predict(poly_regression_old), alpha = 0.8), color = "red") +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Polynomial regression",subtitle = "Original points system")
+```
+
+```{r}
+#--- New points ---#
+
+# Calculate polynomial regression with just the points of the first half of the championship
+poly_regression_new <- training_data %>% 
+                       lm(new_allPoints ~ poly(new_firstHalfPoints, 4), data = .)
+
+# print the summary and information about the polynomial regression
+#paste0("R-squared: ", summary(poly_regression_new)$r.squared)
+poly_r1 <- tibble("Original Points" = summary(poly_regression_old)$r.squared,
+       "New Points" = summary(poly_regression_new)$r.squared)
+
+poly_r1  %>% 
+  gt %>% 
+   tab_header(
+    title = "R-squared"
+  ) %>% 
+  gt_theme_espn()
+
+# plot of the predicted value on top of the original ones using the polynomial regression
+poly_new1 <- ggplot(training_data, aes(new_firstHalfPoints, new_allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = new_firstHalfPoints, y = predict(poly_regression_new), alpha = 0.8), color = "red") +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Polynomial regression",subtitle = "New points system")
+
+# print them side by side
+poly_old1 + poly_new1
+```
+
+### with more features
+
+```{r}
+#--- Original points ---#
+
+# Calculate polynomial regression with more features than just the points of the first half of the championship
+poly_regression_old2 <- training_data %>% 
+                       lm(allPoints ~ poly(firstHalfPoints + qualiRate + winRate, 3), data = .) # removed races and averagePoints
+
+# print the summary and information about the polynomial regression
+#paste0("R-squared: ", summary(poly_regression_old2)$r.squared)
+
+# plot of the predicted value on top of the original ones using the polynomial regression
+poly_old2 <- ggplot(training_data, aes(firstHalfPoints, allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = firstHalfPoints, y = predict(poly_regression_old2), alpha = 0.8), color = "red") +
+  ggtitle("old points") +
+  theme(legend.position="none") +
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Polynomial regression",subtitle = "Original points system")
+```
+
+```{r}
+#--- New points ---#
+
+# Calculate polynomial regression with more features than just the points of the first half of the championship
+poly_regression_new2 <- training_data %>% 
+                       lm(new_allPoints ~ poly(new_firstHalfPoints + qualiRate + winRate, 3), data = .) # removed races and averagePoints
+
+# print the summary and information about the polynomial regression
+#paste0("R-squared: ", summary(poly_regression_new2)$r.squared)
+poly_r2 <-tibble("Original Points" = summary(poly_regression_old2)$r.squared,
+       "New Points" = summary(poly_regression_new2)$r.squared)
+
+poly_r2 %>% 
+  gt %>% 
+   tab_header(
+    title = "R-squared"
+  ) %>% 
+  gt_theme_espn()
+
+# plot of the predicted value on top of the original ones using the polynomial regression
+poly_new2 <- ggplot(training_data, aes(new_firstHalfPoints, new_allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = new_firstHalfPoints, y = predict(poly_regression_new2), alpha = 0.8), color = "red") +
+  ggtitle("new points") +
+  theme(legend.position="none") +
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Polynomial regression",subtitle = "New points system")
+
+# print them side by side
+poly_old2 + poly_new2
+```
+
+## Bayesian linear regression
+
+With the **Bayesian** regression, we formulate linear regression using **probability distributions** rather than point estimates. The response, is not estimated as a single value, but is assumed to be drawn from a probability distribution.
+
+### with one feauture
+
+```{r}
+#--- Original points ---#
+
+# import the library for the Bayesian linear regression and analises
+library(rstanarm)
+library(bayesplot)
+
+# Calculate bayesan regression with more features than just the points of the first half of the championship regression with more features than just the points of the first half of the championship
+capture.output(bayes_old1 <- training_data %>% # capture.output() needed to stop printing all the information about the sampling 
+  stan_glm(allPoints ~ firstHalfPoints, data = .), file = nullfile())
+
+# print the summary and information about the Bayesian linear regression
+#summary(bayes_old1)
+
+# plot of the predicted value on top of the original ones using the quantile regression
+old3 <- ggplot(training_data, aes(firstHalfPoints, allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = firstHalfPoints, y = predict(bayes_old1), alpha = 0.8), color = "red") +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Bayern's regression",subtitle = "Original points system")
+```
+
+```{r}
+#--- New points ---#
+
+# Calculate bayesan regression with more features than just the points of the first half of the championship regression with more features than just the points of the first half of the championship
+capture.output(bayes_new1 <- training_data %>% # capture.output() needed to stop printing all the information about the sampling 
+  stan_glm(new_allPoints ~ new_firstHalfPoints, data = .), file = nullfile())
+
+# print the summary and information about the Bayesian linear regression
+#summary(bayes_new2)
+bayesan_var1 <- tibble("Original Points" = mean(bayes_R2(bayes_old1)),
+       "New Points" = mean(bayes_R2(bayes_new1)))
+
+bayesan_var1 %>% 
+  gt %>% 
+   tab_header(
+    title = "Variance"
+  ) %>% 
+  gt_theme_espn()
+
+# plot of the predicted value on top of the original ones using the quantile regression
+new3 <- ggplot(training_data, aes(new_firstHalfPoints, new_allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = new_firstHalfPoints, y = predict(bayes_new1), alpha = 0.8), color = "red") +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Bayern's regression",subtitle = "New points system")
+
+# print them side by side
+old3 + new3
+```
+
+### with more features
+
+```{r}
+#--- Original points ---#
+
+# Calculate bayesan regression with more features than just the points of the first half of the championship regression with more features than just the points of the first half of the championship
+capture.output(bayes_old2 <- training_data %>% # capture.output() needed to stop printing all the information about the sampling 
+  stan_glm(allPoints ~ firstHalfPoints + qualiRate + winRate + races + averagePoints, data = .), file = nullfile())
+
+# print the summary and information about the Bayesian linear regression
+#summary(bayes_old2)
+
+# plot of the predicted value on top of the original ones using the quantile regression
+old3 <- ggplot(training_data, aes(firstHalfPoints, allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = firstHalfPoints, y = predict(bayes_old2), alpha = 0.8), color = "red") +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Bayern's regression",subtitle = "Original points system")
+```
+
+```{r}
+#--- New points ---#
+
+# Calculate bayesan regression with more features than just the points of the first half of the championship regression with more features than just the points of the first half of the championship
+capture.output(bayes_new2 <- training_data %>% # capture.output() needed to stop printing all the information about the sampling 
+  stan_glm(new_allPoints ~ new_firstHalfPoints + qualiRate + winRate + races + averagePoints, data = .), file = nullfile())
+
+# print the summary and information about the Bayesian linear regression
+#summary(bayes_new1)
+bayesan_var2 <- tibble("Original Points" = mean(bayes_R2(bayes_old2)),
+       "New Points" = mean(bayes_R2(bayes_new2)))
+
+bayesan_var2 %>% 
+  gt %>% 
+   tab_header(
+    title = "Variance"
+  ) %>% 
+  gt_theme_espn()
+
+# plot of the predicted value on top of the original ones using the quantile regression
+new3 <- ggplot(training_data, aes(new_firstHalfPoints, new_allPoints, colour = driverId)) +
+  geom_point(alpha = 0.8) +
+  # add the predicted points colored red
+  geom_point(aes(x = new_firstHalfPoints, y = predict(bayes_new2), alpha = 0.8), color = "red") +
+  theme(legend.position="none") + # remove the legend
+  # axes
+  xlab("Points scored in half the season") +
+  ylab("Points scored in all the season") +
+  # title
+  ggtitle("Bayern's regression",subtitle = "New points system")
+
+# print them side by side
+old3 + new3
+```
+
+# Findings and Conclusion
+
+## Comparison between all the models
+
+Comparison between the _R-squared_ of all the linear and polynomial regressions and using the _variance_ for the bayesan linear regressions divided by original and new points systems.
+
+```{r}
+# create the dataframe
+comparison <- add_row(lm_r1, lm_r2) %>% 
+  add_row(poly_r1) %>% 
+  add_row(poly_r2) %>% 
+  add_row(bayesan_var1) %>% 
+  add_row(bayesan_var2) %>% 
+  # add the name of the regression used
+  mutate(type = c("Linear Regression", 
+                               "Linear Regression with more features", 
+                               "Polynomial Regression", 
+                               "Polynomial Regression with more features", 
+                               "Bayesan Linear Regression",
+                               "Bayesan Linear Regression with more features")) %>% 
+  # move the names in front 
+  relocate(type, .before = "Original Points")
+
+comparison %>% 
+  # remove the title from the name column
+  gt(rowname_col = "type") %>% 
+  # color the row with the max value
+  tab_style(style = cell_fill(color = "lightgreen"), # fill the cell with the selected color
+    locations = cells_body( # position of the cell
+      rows = which(comparison[-1] == max(comparison[-1]), arr.ind = TRUE)[, "row"] # row number
+      ))
+```
+
+
+
+## Predict values for the 2023 season
+
+Using the best suited model, the Linear regression model with more features in this case, and assuming that we are in the second half of the championship we can predict the points in the end will be these:
+
+```{r}
+# create a datafame with the name of the driver and the calculated point at the end of the season
+predicted_data <- data_2023 %>%
+  group_by(driverId) %>% 
+  mutate(driverName = drivers$driverName[drivers$driverId == driverId]) %>% 
+  ungroup() %>% 
+  # calculate the points
+  mutate(predicted_points = floor(predict(linear_regression_old, data_2023))) %>%
+  # select what to print
+  select(driverName, predicted_points) %>% 
+  arrange(desc(predicted_points)) %>% 
+  rename("Driver Name" = driverName) %>% 
+  rename("Predicted points" = predicted_points)
+
+# print predicted values
+predicted_data %>% 
+  # theme
+  gt() %>% 
+  gt_theme_espn()
+```
