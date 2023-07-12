@@ -1,5 +1,5 @@
 ---
-title: "Esame scienza di dati - Formula 1 🏎️"
+title: "Esame Fondamenti di Scienza dei Dati <br> Formula 1 🏎️"
 author: "Enrico Franco, 144237"
 date: "2023-07-14"
 output:
@@ -43,7 +43,7 @@ The word _formula_ refers to the set of rules to which all participants' cars mu
 3. Different type of Regressions
 4. Finding and conclusion
 
-## Questions
+## Question {.flexbox .vcenter}
 
 Is it possible to predict the number of total points each driver will finish the Formula 1 Championship with?
 
